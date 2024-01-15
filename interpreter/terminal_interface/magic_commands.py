@@ -1,9 +1,12 @@
 import json
 import os
 import subprocess
+import platform
 import time
+import threading
 
 from ..core.utils.system_debug_info import system_info
+from .utils.local_storage_path import get_storage_path
 from .utils.count_tokens import count_messages_tokens
 from .utils.display_markdown_message import display_markdown_message
 
@@ -53,6 +56,7 @@ def handle_help(self, arguments):
         "%save_message [path]": "Saves messages to a specified JSON path. If no path is provided, it defaults to 'messages.json'.",
         "%load_message [path]": "Loads messages from a specified JSON path. If no path is provided, it defaults to 'messages.json'.",
         "%tokens [prompt]": "EXPERIMENTAL: Calculate the tokens used by the next request based on the current conversation's messages and estimate the cost of that request; optionally provide a prompt to also calulate the tokens used by that prompt and the total amount of tokens that will be sent with the next request",
+        "%edit": "Edit the previous code block",
         "%help": "Show this help message.",
         "%info": "Show system and interpreter information",
     }
@@ -130,6 +134,73 @@ def handle_load_message(self, json_path):
         f"> messages json loaded from {os.path.abspath(json_path)}"
     )
 
+def edit_code_block(self, arguments):
+    # Find the index of the last code
+    last_code_block = None
+    for i, message in enumerate(self.messages):
+        if message.get("type") == "code":
+            last_code_block = i
+    
+    message_to_edit = []
+
+    # Extract the message
+    if last_code_block is not None:
+        message_to_edit = self.messages[last_code_block]
+        self.messages = self.messages[:last_code_block]
+    
+    # Save the file
+    temp_filename = "editing_text_block"
+    file_path = get_storage_path() + "/" + temp_filename
+    with open(file_path, 'w') as file:
+        file.write(message_to_edit['content'])
+
+    # Open the file in users preferred editor
+    if platform.system() == 'Windows':
+        os.startfile(file_path)
+    elif platform.system() == 'Darwin':
+        subprocess.run(['open', file_path])
+    else:
+        subprocess.run(['xdg-open', file_path])
+        
+    # Function to get the last modified time of a file
+    def get_file_last_modified_time(file_path):
+        return os.path.getmtime(file_path)
+
+    # Function to monitor file changes
+    def monitor_file_changes(file_path, interval=1):
+        last_modified_time = get_file_last_modified_time(file_path)
+
+        while not stop_monitoring.is_set():
+            time.sleep(interval)
+            current_modified_time = get_file_last_modified_time(file_path)
+            if current_modified_time != last_modified_time:
+                print(f"Code has been editted successfully")
+                last_modified_time = current_modified_time
+
+    # Thread stop flag
+    stop_monitoring = threading.Event()
+
+    # Create and start the monitoring thread
+    monitoring_thread = threading.Thread(target=monitor_file_changes, args=(file_path,))
+    monitoring_thread.start()
+
+    print("Monitoring file changes. Press Enter to continue.")
+    input()  # Wait for Enter key press
+    stop_monitoring.set()  # Signal to stop the monitoring thread
+
+    # Wait for the monitoring thread to finish
+    monitoring_thread.join()
+    print("Code edit submitted.")
+
+    
+    with open(file_path, "r") as f:
+        print(f)
+        message_to_edit['content'] = f.read()
+        self.messages.append(message_to_edit)
+
+    print(message_to_edit)
+    print(dir(self))
+    self._respond_and_store()
 
 def handle_count_tokens(self, prompt):
     messages = [{"role": "system", "message": self.system_message}] + self.messages
@@ -190,6 +261,7 @@ def handle_magic_command(self, user_input):
         "reset": handle_reset,
         "save_message": handle_save_message,
         "load_message": handle_load_message,
+        "edit": edit_code_block,
         "undo": handle_undo,
         "tokens": handle_count_tokens,
         "info": handle_info,
